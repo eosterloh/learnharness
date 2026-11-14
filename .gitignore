@@ -29,3 +29,12 @@ xai-credentials.json*
 
 # dev-fresh launcher scratch (fresh-user sim): disposable per launch
 .fresh-data/
+
+# Android sideload build. The keystore is a local signing key, not a committed secret.
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore.properties
+android/.keystore/
+.android-sdk/

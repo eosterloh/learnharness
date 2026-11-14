@@ -284,5 +284,5 @@ export function SideThreadPopover({ state, chatId, composer, ...handlers }: { st
 	</div>;
 }
 export function SideThreadPanel({ children }: { children: ReactNode }) {
-	return <aside aria-label="Side question" data-testid="side-thread-panel" className="flex w-[22rem] shrink-0 flex-col border-l border-border bg-background p-3">{children}</aside>;
+	return <aside aria-label="Side question" data-testid="side-thread-panel" className="flex w-[22rem] shrink-0 flex-col border-l border-border bg-background p-3 max-sm:fixed max-sm:inset-0 max-sm:z-40 max-sm:w-auto max-sm:border-l-0">{children}</aside>;
 }

@@ -1,0 +1,24 @@
+[Unit]
+Description=LearnHarness
+After=network-online.target
+
+[Service]
+Type=simple
+User=learnharness
+Group=learnharness
+WorkingDirectory=/opt/learnharness
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3000
+Environment=LH_SERVER_MODE=1
+Environment=LH_DATA_DIR=/var/lib/learnharness/data
+Environment=LH_AUTH_FILE=/var/lib/learnharness/auth.json
+Environment=CHROME_PATH=/usr/bin/chromium
+EnvironmentFile=-/etc/learnharness.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/node /opt/learnharness/server.js
+Restart=on-failure
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

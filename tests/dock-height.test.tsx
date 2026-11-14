@@ -35,7 +35,12 @@ Object.assign(globalThis, {
 // dock import would select the hook's SSR effect before this setup ever runs.
 const { QuestionDock } = await import("../components/question-dock.tsx");
 const { PracticeDock } = await import("../components/practice-dock.tsx");
-const { dockHeightBudget, syncDockHeight, useDockHeight, forwardDockWheel } = await import("../components/dock-height.ts");
+const {
+	PHONE_DOCK_BLOCK_FRACTION, PHONE_DOCK_MAX_FRACTION, PHONE_DOCK_MIN_FRACTION, PHONE_DOCK_STORAGE_KEY,
+	bindDockSheetHandle, clampPhoneDockFraction, clampPhoneDockFractionToViewport, dockFractionFromDrag,
+	dockHeightBudget, getPhoneDockFraction, phoneDockBlockCap, readPhoneDockFraction, setPhoneDockFraction,
+	syncDockHeight, useDockHeight, forwardDockWheel,
+} = await import("../components/dock-height.ts");
 
 const normal = {
 	columnHeight: 700, outsideHeight: 60, beforeShellHeight: 0,
@@ -74,6 +79,40 @@ describe("dockHeightBudget — whole dock, not just its question", () => {
 		assert.equal(dockHeightBudget({ ...normal, questionHeight: null, contentHeight: 42 }).scrollWholeContent, false);
 		assert.equal(dockHeightBudget({ ...normal, questionHeight: null, contentHeight: 42, beforeShellHeight: 650 }).scrollWholeContent, true);
 	});
+	it("caps a phone dock at 58% of the dynamic viewport and leaves the column above it", () => {
+		assert.equal(phoneDockBlockCap(1200, 900), null);
+		assert.equal(phoneDockBlockCap(640, 900), null);
+		const cap = phoneDockBlockCap(412, 800);
+		assert.equal(cap, 800 * PHONE_DOCK_BLOCK_FRACTION);
+		const open = dockHeightBudget({ ...normal, columnHeight: 740, outsideHeight: 48, viewportCap: cap });
+		assert.equal(open.viewportMaxHeight, 800 * PHONE_DOCK_BLOCK_FRACTION - 48);
+		assert.ok(740 - open.viewportMaxHeight - 48 > 200, "transcript keeps a visible band above the card");
+		assert.equal(open.scrollWholeContent, false);
+		assert.ok((open.questionMaxHeight ?? 0) > 12, "options keep their own scroller");
+	});
+	it("keeps the answer controls reachable when the keyboard shrinks a phone viewport", () => {
+		const cap = phoneDockBlockCap(412, 360);
+		const keyboard = dockHeightBudget({
+			...normal, columnHeight: 300, outsideHeight: 40, contentHeight: 700, questionHeight: 500, viewportCap: cap,
+		});
+		assert.equal(keyboard.scrollWholeContent, true);
+		assert.ok(keyboard.viewportMaxHeight > 0);
+		assert.equal(keyboard.viewportMaxHeight, Math.min(300 - 32 - 40, 360 * PHONE_DOCK_BLOCK_FRACTION - 40, 300 - 96 - 40));
+	});
+	it("drags the sheet up and down within the saved range", () => {
+		assert.equal(readPhoneDockFraction(null), PHONE_DOCK_BLOCK_FRACTION);
+		assert.equal(readPhoneDockFraction("0.7"), 0.7);
+		assert.equal(readPhoneDockFraction("nope"), PHONE_DOCK_BLOCK_FRACTION);
+		assert.equal(readPhoneDockFraction("2"), PHONE_DOCK_MAX_FRACTION);
+		assert.equal(dockFractionFromDrag(0.58, -80, 800), clampPhoneDockFraction(0.58 + 0.1));
+		assert.equal(dockFractionFromDrag(0.58, 160, 800), clampPhoneDockFraction(0.58 - 0.2));
+		assert.equal(dockFractionFromDrag(0.58, -4000, 800), PHONE_DOCK_MAX_FRACTION);
+		assert.equal(dockFractionFromDrag(0.58, 4000, 800), PHONE_DOCK_MIN_FRACTION);
+		assert.equal(clampPhoneDockFractionToViewport(0.9, 800, 740), Math.min(PHONE_DOCK_MAX_FRACTION, (740 - 96) / 800));
+		const saved = phoneDockBlockCap(412, 800, 0.7);
+		assert.equal(saved, 560);
+		assert.equal(dockHeightBudget({ ...normal, columnHeight: 740, outsideHeight: 48, viewportCap: saved }).viewportMaxHeight, 512);
+	});
 });
 
 // These mocked dimensions test the DOM/lifecycle seam, not real CSS layout.
@@ -89,7 +128,8 @@ dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
 	return originalRect.call(this);
 };
 Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { configurable: true, get() { return this.dataset.part === "column" ? sizes.column : Number(this.dataset.clientHeight ?? 0); } });
-Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { configurable: true, get() { return this.dataset.part === "column" ? 680 : 700; } });
+let columnWidth = 680;
+Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { configurable: true, get() { return this.dataset.part === "column" ? columnWidth : 700; } });
 Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { configurable: true, get() { return 700; } });
 Object.defineProperty(dom.window.HTMLElement.prototype, "scrollHeight", { configurable: true, get() { return Number(this.dataset.scrollHeight ?? 0); } });
 
@@ -295,6 +335,67 @@ describe("measured question/practice DOM and observer lifecycle", () => {
 				body: part(host, "body"), shell: part(host, "shell"), content: part(host, "content") };
 			assert.deepEqual(syncDockHeight(elements, true), syncDockHeight(elements, true));
 		});
+	});
+	it("caps a phone-width column from the dynamic viewport before the morph layout effect", async () => {
+		const previousWidth = columnWidth;
+		const previousHeight = dom.window.innerHeight;
+		columnWidth = 412;
+		Object.defineProperty(dom.window, "innerHeight", { configurable: true, value: 800 });
+		try {
+			await withFixture(async (host, render) => {
+				sizes.column = 740;
+				await render({ inspected: block => assert.equal(block.style.getPropertyValue("--dock-max-h"), "202px") });
+				assert.equal(part(host, "viewport").style.maxHeight, "404px");
+				assert.equal(part(host, "shell").style.maxHeight, "404px");
+				assert.equal(part(host, "viewport").style.overflowY, "visible");
+			});
+		} finally {
+			columnWidth = previousWidth;
+			Object.defineProperty(dom.window, "innerHeight", { configurable: true, value: previousHeight });
+		}
+	});
+});
+
+describe("phone sheet handle", () => {
+	it("stores the dragged height and keeps the gesture off the page", async () => {
+		const memory = new Map<string, string>();
+		Object.defineProperty(dom.window, "localStorage", {
+			configurable: true,
+			value: { getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => { memory.set(key, value); } },
+		});
+		Object.defineProperty(dom.window, "innerHeight", { configurable: true, value: 800 });
+		setPhoneDockFraction(0.58, false);
+		const handle = document.createElement("button");
+		handle.setPointerCapture = () => {};
+		let frames = 0;
+		const previousFrame = globalThis.requestAnimationFrame;
+		globalThis.requestAnimationFrame = (callback) => { frames++; callback(0); return frames; };
+		const previousWidth = columnWidth;
+		columnWidth = 412;
+		const off = bindDockSheetHandle(handle);
+		try {
+			const down = new dom.window.Event("pointerdown", { bubbles: true, cancelable: true });
+			Object.assign(down, { button: 0, pointerId: 1, clientY: 200 });
+			handle.dispatchEvent(down);
+			assert.equal(down.defaultPrevented, true);
+			const move = new dom.window.Event("pointermove", { bubbles: true, cancelable: true });
+			Object.assign(move, { button: 0, pointerId: 1, clientY: 120 });
+			handle.dispatchEvent(move);
+			assert.equal(move.defaultPrevented, true);
+			assert.equal(getPhoneDockFraction(), clampPhoneDockFraction(0.58 + 80 / 800));
+			assert.equal(memory.has(PHONE_DOCK_STORAGE_KEY), false, "the height is stored when the drag ends");
+			const touch = new dom.window.Event("touchmove", { bubbles: true, cancelable: true });
+			handle.dispatchEvent(touch);
+			assert.equal(touch.defaultPrevented, true);
+			handle.dispatchEvent(new dom.window.Event("pointerup"));
+			assert.equal(memory.get(PHONE_DOCK_STORAGE_KEY), String(getPhoneDockFraction()));
+			assert.ok(frames >= 1);
+		} finally {
+			off();
+			columnWidth = previousWidth;
+			globalThis.requestAnimationFrame = previousFrame;
+			setPhoneDockFraction(PHONE_DOCK_BLOCK_FRACTION, false);
+		}
 	});
 });
 

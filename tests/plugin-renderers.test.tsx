@@ -307,7 +307,10 @@ describe("native session result retention", () => {
 			const live = model.getState().messages.flatMap(message => message.parts).find(part => part.toolCallId === "call-1")!;
 			assert.deepEqual(live.result, { content, details: undefined, isError });
 			assert.equal(live.state, isError ? "output-error" : "output-available");
-			controller.close(); await consume;
+			controller.close();
+			await consume.catch((error: unknown) => {
+				assert.match(error instanceof Error ? error.message : String(error), /connection dropped/);
+			});
 			const restored = projectView([assistant, { id: "result-1", role: "toolResult", toolCallId: "call-1", toolName: "custom_tool", content, isError, timestamp: 2 } as LhMessage]).flatMap(message => message.parts).find(part => part.toolCallId === "call-1")!;
 			assert.deepEqual(restored.result, live.result);
 		}

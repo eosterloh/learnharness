@@ -56,7 +56,7 @@ const STORAGE_KEY = "lh:sidebar-open";
 import type { ChatGPTControlBridge, NativeSubscriptionControlBridge } from "@/src/core";
 import type { UpdateState } from "@/components/settings/update-settings.tsx";
 import { FilePathDropZone } from "@/components/file-path-drop-zone";
-const SIDEBAR_AUTOCLOSE = 928;
+import { initialSidebarOpen, sidebarShown, sidebarViewport, type SidebarViewport } from "@/components/sidebar-layout";
 
 // Module scope, guarded for SSR (the server has no navigator).
 const IS_ELECTRON = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
@@ -90,12 +90,18 @@ declare global {
 			checkForUpdates?: () => Promise<void>;
 			installUpdate?: () => void;
 			onOpenSettings?: (cb: (section: string) => void) => () => void;
+			/** Packaged and dev shells. Absent in the browser. */
+			clientConnection?: {
+				get: () => Promise<{ mode: "local" | "remote" | "dev"; url: string | null; source: string; serverUrl: string }>;
+				set: (serverUrl: string | null) => Promise<{ ok?: boolean; error?: string }>;
+			};
 		};
 	}
 }
 
-const SidebarContext = createContext<{ open: boolean; toggle: () => void }>({
+const SidebarContext = createContext<{ open: boolean; overlay: boolean; toggle: () => void }>({
 	open: false,
+	overlay: false,
 	toggle: () => {},
 });
 
@@ -114,7 +120,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 	// Start closed so server and client first-render agree (no hydration
 	// mismatch); the stored value is applied after mount.
 	const [open, setOpen] = useState(false);
-	const [narrow, setNarrow] = useState(false);
+	const [viewport, setViewport] = useState<SidebarViewport>("wide");
 	const [mounted, setMounted] = useState(false);
 
 	useEffect(() => {
@@ -139,41 +145,44 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 		void window.lh?.getZoom?.().then(setZoomVar);
 
 		const stored = localStorage.getItem(STORAGE_KEY);
-		// Default: open (first run introduces the sidebar).
-		setOpen(stored === null ? true : stored === "1");
+		// Default: open on a desktop, closed on a phone so the lesson is visible.
+		setOpen(initialSidebarOpen(stored, window.innerWidth));
 		setMounted(true);
 		return () => off?.();
 	}, []);
 
-	// Narrow-window auto-close/auto-restore (see SIDEBAR_AUTOCLOSE note):
-	// fires only on actual resizes — a boolean compare, no layout work.
-	// Both this and the mount effect land before the first paint, so a
-	// narrow window never flashes the open sidebar on load.
+	// Narrow-window auto-close/auto-restore. Electron below 928px asks the
+	// shell to widen. A phone-width viewport, on every host, covers the page
+	// with the sidebar instead of squeezing the lesson beside it.
 	useEffect(() => {
-		if (!IS_ELECTRON) return; // plain-browser tabs open freely
-		const onResize = () => setNarrow(window.innerWidth < SIDEBAR_AUTOCLOSE);
+		const onResize = () => setViewport(sidebarViewport(window.innerWidth, IS_ELECTRON));
 		onResize();
 		window.addEventListener("resize", onResize);
 		return () => window.removeEventListener("resize", onResize);
 	}, []);
 
 	const toggle = useCallback(() => {
-		// Opening while narrow (auto-closed, or the user's own closed-at-
-		// narrow): ask the shell to widen to the threshold — the resize
-		// listener flips `narrow` and the sidebar appears. The preference
-		// persists like any other open, so a restart at a narrow width
-		// still auto-restores when widened.
-		if (narrow && !open) {
+		if (viewport === "phone") {
+			setOpen((value) => {
+				const next = !value;
+				localStorage.setItem(STORAGE_KEY, next ? "1" : "0");
+				return next;
+			});
+			return;
+		}
+		// Opening while the Electron window is narrow: ask the shell to widen.
+		// The existing preference write is unchanged.
+		if (viewport === "electron-narrow" && !open) {
 			localStorage.setItem(STORAGE_KEY, "0");
 			setOpen(true);
 			window.lh?.expandWindow();
 			return;
 		}
-		setOpen((v) => {
-			localStorage.setItem(STORAGE_KEY, v ? "0" : "1");
-			return !v;
+		setOpen((value) => {
+			localStorage.setItem(STORAGE_KEY, value ? "0" : "1");
+			return !value;
 		});
-	}, [narrow, open]);
+	}, [viewport, open]);
 
 	// ⌘B: the global shortcut dispatches kbdEventForAction("toggle-sidebar")
 	// and the context answers on exactly that name — the shared spelling
@@ -188,8 +197,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 		return () => window.removeEventListener(event, onToggle);
 	}, [toggle]);
 
+	const shown = sidebarShown(open, viewport);
 	return (
-		<SidebarContext.Provider value={{ open: open && !narrow, toggle }}>
+		<SidebarContext.Provider value={{ open: shown !== "closed", overlay: shown === "overlay", toggle }}>
 			{/* transitions gated on mount: no slide-in flash on page load */}
 			<div className={cn("flex h-dvh", mounted && "[&_.sidebar-motion]:transition-[width,margin,opacity]")}>{children}</div>
 		</SidebarContext.Provider>
@@ -404,7 +414,7 @@ const KIND_FILTER_KEY = "lh:session-kind-filter";
 
 function SessionsSidebar() {
 	const interactions = useInteractionLayers();
-	const { open, toggle } = useSidebar();
+	const { open, overlay, toggle } = useSidebar();
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
 	const [query, setQuery] = useState("");
 	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
@@ -418,6 +428,12 @@ function SessionsSidebar() {
 	}, []);
 	const pathname = usePathname();
 	const router = useRouter();
+	const previousPath = useRef(pathname);
+	useEffect(() => {
+		if (previousPath.current === pathname) return;
+		previousPath.current = pathname;
+		if (overlay) toggle();
+	}, [pathname, overlay, toggle]);
 	const { open: openSettings } = useSettingsDialog();
 
 	/* New session (owner, 2026-09-13): NO POST — the button opens the
@@ -652,8 +668,15 @@ function SessionsSidebar() {
 	}, [open, pathname, refresh]);
 
 	return (
+		<>
+		{overlay && (
+			<button type="button" aria-label="Close sidebar" className="fixed inset-0 z-30 bg-background/60" onClick={toggle} />
+		)}
 		<aside
-			className={cn("sidebar-motion shrink-0 overflow-hidden duration-200", open ? "w-72" : "w-0")}
+			className={cn(
+				"sidebar-motion shrink-0 overflow-hidden duration-200",
+				overlay ? "fixed inset-y-0 left-0 z-40 w-72 shadow-xl" : open ? "w-72" : "w-0",
+			)}
 			aria-hidden={!open}
 		>
 			<div className="flex h-full w-72 flex-col border-r bg-background">
@@ -946,6 +969,7 @@ function SessionsSidebar() {
 					onDeleted={onDeleted}
 				/>
 			</aside>
+		</>
 	);
 }
 

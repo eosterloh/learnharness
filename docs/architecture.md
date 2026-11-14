@@ -51,7 +51,7 @@ Settlement persists new native messages, plan snapshots, and usage, including pa
 
 [`pi/ui-stream.ts`](../src/server/pi/ui-stream.ts) emits native agent events. Partial-message updates replace a slot; they are not accumulated text deltas. Replay retains settled events and the latest in-flight updates, with coalesced live fan-out. Tool IDs are uniquified against history so persistence, answer routing, and provider context agree.
 
-Disconnecting a browser detaches a view, not the agent. Explicit abort is separate. [`session-core.ts`](../components/session-core.ts) owns reattachment, bounded 409 recovery, and adoption of canonical state. One recovery attachment is allowed after premature EOF/read failure; repeated transport failure shows an error.
+Disconnecting a browser detaches a view, not the agent. Explicit abort is separate. [`session-core.ts`](../components/session-core.ts) owns reattachment, bounded 409 recovery, and adoption of canonical state. A dropped view keeps reattaching to the same server turn until it settles or the failure is not a transport drop. A plain disconnect does not show an error. The page retries when it becomes visible, the network returns, or the Android shell fires `lh:resume`.
 
 Question drafts survive optimistic unmount in memory. Uncertain submissions reconcile the saved record and running state before resending, scoped to the same question occurrence. Provider-response retry is explicit: it preserves failed attempts on disk while omitting the eligible failed tail from temporary model context. It is not mount-time replay or automatic retry of arbitrary failures.
 
@@ -166,6 +166,8 @@ Chats and graph-family files have separate version guards; absent stamps read as
 ## Host and providers
 
 Packaged Electron launches a private standalone Next child on loopback, sets data/auth paths, and loads a sandboxed renderer. Its navigation/permission and credential transport guards are desktop boundaries, not web multi-user authentication. [Desktop releases](desktop-release.md) covers tracing/packaging checks.
+
+`LH_SERVER_MODE=1` is the headless gate for one owner. `/api/*` (including SSE) and page loads require a scrypt password hash stored beside `LH_AUTH_FILE`. A session is an httpOnly cookie or a bearer token. The desktop capability is unchanged and wins if both are set, so the packaged child never asks for the password. [Self-hosting](self-hosting.md) is the deployment. One process owns a data directory; there is no second writer and no sync engine.
 
 [`models.ts`](../src/agent/models.ts) composes Pi providers and app bridges. Strong/Cheap/Vision slots have no factory model pins. Sessions retain explicit choices; background roles resolve independently. Missing configuration/readiness refuses rather than silently choosing another provider.
 

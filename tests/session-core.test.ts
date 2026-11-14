@@ -732,7 +732,7 @@ describe("truncated stream recovery", () => {
 
 	it("reattaches once after EOF without DONE and replaces the incomplete replay", async () => {
 		let streams = 0;
-		const m = model({ fetch: dietFetch({ userText: "go", settledMessages: [assistantMsg("saved-complete", "complete")], stream: () => ++streams === 1 ? truncated() : completed() }) });
+		const m = model({ reconnectDelayMs: 0, fetch: dietFetch({ userText: "go", settledMessages: [assistantMsg("saved-complete", "complete")], stream: () => ++streams === 1 ? truncated() : completed() }) });
 		await m.send({ type: "text", text: "go" });
 		assert.equal(streams, 2);
 		assert.equal(m.status, "ready");
@@ -741,34 +741,38 @@ describe("truncated stream recovery", () => {
 		assert.equal(m.getState().messages.at(-1)!.parts.at(-1)!.text, "complete");
 	});
 
-	it("surfaces an error after a second truncation without retrying the input", async () => {
+	it("keeps reattaching after repeated drops and shows the finished turn without resending", async () => {
 		let streams = 0;
 		let posts = 0;
-		const m = model({ fetch: dietFetch({ onPost: () => posts++, stream: () => { streams++; return truncated(); } }) });
+		const m = model({ reconnectDelayMs: 0, fetch: dietFetch({ onPost: () => posts++, userText: "go", settledMessages: [assistantMsg("saved-complete", "complete")], stream: () => ++streams < 4 ? truncated() : completed() }) });
 		await m.send({ type: "text", text: "go" });
 		assert.equal(posts, 1);
-		assert.equal(streams, 2);
-		assert.equal(m.status, "error");
-		assert.equal(m.getState().error?.message, "The connection dropped before the turn completed.");
+		assert.equal(streams, 4);
+		assert.equal(m.status, "ready");
+		assert.equal(m.getState().error, null);
+		assert.equal(m.getState().messages.at(-1)!.parts.at(-1)!.text, "complete");
 	});
 
-	it("reports the approved connection error when the recovery record read fails", async () => {
+	it("reattaches when a recovery record read fails and does not banner the disconnect", async () => {
 		let reads = 0;
-		const m = model({ fetch: async (url) => {
+		let streams = 0;
+		const m = model({ reconnectDelayMs: 0, fetch: async (url) => {
 			if (String(url) === "/api/chat") return Response.json({ ok: true });
-			if (String(url).endsWith("/stream")) return truncated();
-			if (++reads === 1) return Response.json({ messages: [] });
-			throw new TypeError("synthetic offline");
+			if (String(url).endsWith("/stream")) return ++streams < 2 ? truncated() : completed();
+			if (++reads === 2) throw new TypeError("synthetic offline");
+			return Response.json({ messages: streams >= 2 ? [assistantMsg("saved-complete", "complete")] : [] });
 		} });
 		await m.send({ type: "text", text: "go" });
-		assert.equal(m.status, "error");
-		assert.equal(m.getState().error?.message, "The connection dropped before the turn completed.");
+		assert.equal(reads >= 3, true);
+		assert.equal(m.status, "ready");
+		assert.equal(m.getState().error, null);
+		assert.equal(m.getState().messages.at(-1)!.parts.at(-1)!.text, "complete");
 	});
 
 	it("accepts turn-settled when the original turn finished during the disconnection", async () => {
 		let streams = 0;
 		let settled = 0;
-		const m = model({ onReattachSettled: () => { settled++; }, fetch: dietFetch({ stream: () => ++streams === 1 ? truncated() : sseResponse({ type: "turn-settled" }, "[DONE]") }) });
+		const m = model({ reconnectDelayMs: 0, onReattachSettled: () => { settled++; }, fetch: dietFetch({ stream: () => ++streams === 1 ? truncated() : sseResponse({ type: "turn-settled" }, "[DONE]") }) });
 		await m.send({ type: "text", text: "go" });
 		assert.equal(streams, 2);
 		assert.equal(settled, 1);
@@ -778,7 +782,7 @@ describe("truncated stream recovery", () => {
 
 	it("also recovers a rejected body read but does not relabel event-application bugs", async () => {
 		let streams = 0;
-		const m = model({ fetch: dietFetch({ stream: () => ++streams === 1 ? new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("synthetic read failure")); } })) : completed() }) });
+		const m = model({ reconnectDelayMs: 0, fetch: dietFetch({ stream: () => ++streams === 1 ? new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("synthetic read failure")); } })) : completed() }) });
 		await m.send({ type: "text", text: "go" });
 		assert.equal(streams, 2);
 		assert.equal(m.status, "ready");
@@ -792,7 +796,7 @@ describe("truncated stream recovery", () => {
 
 	it("recovers an AbortError body rejection unless the view was actually cancelled", async () => {
 		let streams = 0;
-		const m = model({ fetch: dietFetch({ stream: () => ++streams === 1 ? new Response(new ReadableStream({
+		const m = model({ reconnectDelayMs: 0, fetch: dietFetch({ stream: () => ++streams === 1 ? new Response(new ReadableStream({
 			start(controller) { controller.error(new DOMException("synthetic unexpected read abort", "AbortError")); },
 		})) : completed() }) });
 		await m.send({ type: "text", text: "go" });
@@ -801,17 +805,19 @@ describe("truncated stream recovery", () => {
 		assert.equal(m.getState().error, null);
 	});
 
-	it("uses the approved drop message when recovery record headers arrive but its body read fails", async () => {
+	it("reattaches when a recovery record body fails and then shows the finished turn", async () => {
 		let reads = 0;
-		const m = model({ fetch: async (url) => {
+		let streams = 0;
+		const m = model({ reconnectDelayMs: 0, fetch: async (url) => {
 			if (String(url) === "/api/chat") return Response.json({ ok: true });
-			if (String(url).endsWith("/stream")) return truncated();
-			if (++reads === 1) return Response.json({ messages: [] });
-			return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("synthetic record-body transport failure")); } }));
+			if (String(url).endsWith("/stream")) return ++streams < 2 ? truncated() : completed();
+			if (++reads === 2) return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("synthetic record-body transport failure")); } }));
+			return Response.json({ messages: streams >= 2 ? [assistantMsg("saved-complete", "complete")] : [] });
 		} });
 		await m.send({ type: "text", text: "go" });
-		assert.equal(m.status, "error");
-		assert.equal(m.getState().error?.message, "The connection dropped before the turn completed.");
+		assert.equal(m.status, "ready");
+		assert.equal(m.getState().error, null);
+		assert.equal(m.getState().messages.at(-1)!.parts.at(-1)!.text, "complete");
 	});
 
 	it("preserves malformed-event diagnostics rather than calling them network drops", async () => {
@@ -824,13 +830,53 @@ describe("truncated stream recovery", () => {
 		assert.match(m.getState().error!.message, /JSON|property name/);
 	});
 
-	it("reports a failed recovery stream request without attempting a third attachment", async () => {
+	it("reports a refused recovery stream without attempting a third attachment", async () => {
 		let streams = 0;
-		const m = model({ fetch: dietFetch({ stream: () => ++streams === 1 ? truncated() : new Response("synthetic unavailable", { status: 503 }) }) });
+		const m = model({ reconnectDelayMs: 0, fetch: dietFetch({ stream: () => ++streams === 1 ? truncated() : new Response("synthetic unavailable", { status: 503 }) }) });
 		await m.send({ type: "text", text: "go" });
 		assert.equal(streams, 2);
 		assert.equal(m.status, "error");
-		assert.equal(m.getState().error?.message, "The connection dropped before the turn completed.");
+		assert.equal(m.getState().error?.message, "synthetic unavailable");
+	});
+
+	it("nudgeReconnect resumes a dropped view without waiting out the backoff", async () => {
+		let streams = 0;
+		const m = model({ reconnectDelayMs: 60_000, fetch: dietFetch({ userText: "go", settledMessages: [assistantMsg("saved-complete", "complete")], stream: () => ++streams === 1 ? truncated() : completed() }) });
+		const pending = m.send({ type: "text", text: "go" });
+		const poke = setInterval(() => m.nudgeReconnect(), 10);
+		const result = await Promise.race([
+			pending.then(() => "done" as const),
+			new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 1_000)),
+		]);
+		clearInterval(poke);
+		assert.equal(result, "done");
+		assert.equal(streams, 2);
+		assert.equal(m.status, "ready");
+		assert.equal(m.getState().error, null);
+		assert.equal(m.getState().messages.at(-1)!.parts.at(-1)!.text, "complete");
+	});
+
+	it("a forced resume drops a hung view and catches up on the same turn", async () => {
+		let streams = 0;
+		let hang!: ReadableStreamDefaultController<Uint8Array>;
+		const m = model({ reconnectDelayMs: 0, fetch: dietFetch({ userText: "go", settledMessages: [assistantMsg("saved-complete", "complete")], stream: () => {
+			streams++;
+			if (streams === 1) return new Response(new ReadableStream({ start(controller) { hang = controller; } }));
+			return completed();
+		} }) });
+		const pending = m.send({ type: "text", text: "go" });
+		const started = Date.now();
+		while (streams < 1 && Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(streams, 1);
+		m.nudgeReconnect(true);
+		hang.error(new DOMException("Aborted", "AbortError"));
+		await pending;
+		const waited = Date.now();
+		while (m.status !== "ready" && Date.now() - waited < 1_000) await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(streams, 2);
+		assert.equal(m.status, "ready");
+		assert.equal(m.getState().error, null);
+		assert.equal(m.getState().messages.at(-1)!.parts.at(-1)!.text, "complete");
 	});
 
 	it("a superseded consume cannot recover or overwrite its replacement's state", async () => {
@@ -988,33 +1034,38 @@ describe("answer submission recovery", () => {
 	});
 
 	it("does not undo an acknowledged dismissal when an unrelated send's record read fails", async () => {
-		const m = model({ initialMessages: [question], fetch: async (url) => {
+		let reads = 0;
+		const m = model({ reconnectDelayMs: 0, initialMessages: [question], fetch: async (url) => {
 			if (String(url).endsWith("/dismiss") || String(url) === "/api/chat") return Response.json({ ok: true });
+			reads++;
 			throw new TypeError("record read failed");
 		} });
 		await m.dismissQuestion("q1", dismissedAnswer("quiz", "Q?"));
-		await m.send({ type: "text", text: "move on" });
-		assert.equal(m.status, "error");
-		const part = m.getState().messages.flatMap(m => m.parts).find(p => p.toolCallId === "q1")!;
+		const pending = m.send({ type: "text", text: "move on" });
+		const started = Date.now();
+		while (reads < 1 && Date.now() - started < 1_000) await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.ok(reads >= 1);
+		m.stop();
+		await pending;
+		const part = m.getState().messages.flatMap(message => message.parts).find(p => p.toolCallId === "q1")!;
 		assert.equal(part.state, "output-available");
 		assert.equal((part.output as { dismissed: boolean }).dismissed, true);
 	});
 
-	it("restores an unconfirmed optimistic answer when the post-ack record read fails", async () => {
+	it("adopts the saved answer after a dropped post-ack record read without posting it again", async () => {
 		let posts = 0;
 		let reads = 0;
 		const saved = JSON.parse(JSON.stringify([question, newAnswerResult("q1", "quiz", answer)])) as LhMessage[];
-		const m = model({ initialMessages: [question], fetch: async (url) => {
+		const m = model({ reconnectDelayMs: 0, initialMessages: [question], fetch: async (url) => {
 			if (String(url) === "/api/chat") { posts++; return Response.json({ ok: true }); }
+			if (String(url).endsWith("/stream")) return sseResponse({ type: "turn-settled" }, "[DONE]");
 			if (++reads === 1) throw new TypeError("record read failed");
 			return Response.json({ messages: saved, turnInFlight: false });
 		} });
 		await m.submitAnswer("quiz", "q1", answer);
-		assert.equal(m.status, "error");
-		assert.equal(m.getState().nativeMessages.some(m => m.role === "toolResult"), false);
-		await m.submitAnswer("quiz", "q1", answer);
 		assert.equal(posts, 1, "the acknowledged answer must not be reposted");
 		assert.equal(m.status, "ready");
+		assert.equal(m.getState().error, null);
 		assert.deepEqual(m.getState().nativeMessages, saved);
 	});
 

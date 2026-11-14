@@ -81,6 +81,8 @@ export interface SessionModelDeps {
 	/** Injectable retry timing (tests). */
 	pollMs?: number;
 	waitMaxMs?: number;
+	/** First wait after a dropped turn view. 0 retries immediately. Later waits double, capped at 8s. */
+	reconnectDelayMs?: number;
 }
 
 /** A local optimistic id (never a server stamp — absorption and the
@@ -271,6 +273,9 @@ export class SessionModel {
 	private steerQueueValue: SteerQueueItem[] = [];
 	private readonly pollMs: number;
 	private readonly waitMaxMs: number;
+	private readonly reconnectDelayMs: number;
+	/** Aborted by nudgeReconnect so a resumed app does not sit out the backoff. */
+	private reconnectWait: AbortController | null = null;
 	private onReattachSettled?: () => void;
 	/** The hook's re-render trigger (set by the adapter). */
 	onChange?: () => void;
@@ -345,6 +350,7 @@ export class SessionModel {
 		this.fetch = opts.fetch ?? ((...args) => globalThis.fetch(...args));
 		this.pollMs = opts.pollMs ?? TURN_POLL_MS;
 		this.waitMaxMs = opts.waitMaxMs ?? TURN_WAIT_MAX_MS;
+		this.reconnectDelayMs = opts.reconnectDelayMs ?? 400;
 		this.onChange = opts.onChange;
 		this.onReattachSettled = opts.onReattachSettled;
 	}
@@ -712,6 +718,7 @@ export class SessionModel {
 	/** Consume one SSE body to its [DONE] terminal. The turn-settled
 	 *  terminal (stream-route only) fires the settle hook and ends. */
 	async consumeStream(res: Response, controller = this.consumeAbort, allowRecovery = true): Promise<void> {
+		void allowRecovery;
 		if (!res.body) throw new Error("The turn stream body is empty.");
 		const reader = res.body.getReader();
 		let sawEvent = false;
@@ -757,19 +764,82 @@ export class SessionModel {
 			}
 		}
 		if (this.consumeAbort !== controller || sawDone) return;
-		if (!allowRecovery) throw new StreamReadError(new Error(STREAM_DROPPED));
-		// One read-only recovery: refresh the canonical base, then replay the
-		// SAME server-owned turn. Never resend the learner's input.
-		await this.resumeStream(true, false);
+		// The turn is server-owned. A dropped view is not a failed turn.
+		throw new StreamReadError(new Error(STREAM_DROPPED));
+	}
+
+	/** Retry the same server turn until it settles, the view is replaced, or
+	 * the failure is not a transport drop. Never resends the learner's input. */
+	private async keepViewAttached(controller: AbortController, refetchRecordFirst: boolean): Promise<void> {
+		let refetch = refetchRecordFirst;
+		let attempt = 0;
+		while (this.consumeAbort === controller && !controller.signal.aborted) {
+			try {
+				await this.openTurnView(controller, refetch);
+				return;
+			} catch (err) {
+				if (this.consumeAbort !== controller || controller.signal.aborted) return;
+				if (!(err instanceof StreamReadError)) {
+					this.failView(controller, err);
+					return;
+				}
+				if (this.errorValue) this.setError(null);
+				if (this.statusValue === "error") this.setStatus("streaming");
+				refetch = true;
+				attempt++;
+				const wait = new AbortController();
+				this.reconnectWait = wait;
+				const abortWait = () => wait.abort();
+				controller.signal.addEventListener("abort", abortWait, { once: true });
+				try {
+					await delay(this.nextReconnectDelay(attempt), wait.signal);
+				} catch {
+					if (controller.signal.aborted || this.consumeAbort !== controller) return;
+				} finally {
+					controller.signal.removeEventListener("abort", abortWait);
+					if (this.reconnectWait === wait) this.reconnectWait = null;
+				}
+			}
+		}
+	}
+
+	private nextReconnectDelay(attempt: number): number {
+		if (this.reconnectDelayMs <= 0) return 0;
+		return Math.min(this.reconnectDelayMs * 2 ** Math.min(attempt - 1, 4), 8_000);
+	}
+
+	/** Wake a paused reattach. force also drops a view that may be half-open
+	 *  after the process was suspended or the network changed. */
+	nudgeReconnect(force = false): void {
+		if (this.reconnectWait) {
+			this.reconnectWait.abort();
+			return;
+		}
+		if (force && (this.statusValue === "submitted" || this.statusValue === "streaming")) {
+			void this.resumeStream(true);
+			return;
+		}
+		if (this.statusValue === "error" && this.errorValue?.message === STREAM_DROPPED) void this.resumeStream(true);
+	}
+
+	private failView(controller: AbortController, err: unknown): void {
+		if (this.consumeAbort !== controller || controller.signal.aborted) return;
+		this.retireImagePreview(this.imagePreview?.owner ?? null);
+		this.mutate(() => {
+			this.tail = this.tail.filter(m => !this.unconfirmedAnswers.has(m.id));
+			this.unconfirmedAnswers.clear();
+		});
+		this.setError(err instanceof Error ? err.message : String(err));
+		this.setStatus("error");
 	}
 
 	private async fetchView(url: string, signal: AbortSignal | undefined, recoveringDrop: boolean): Promise<Response> {
 		try {
-			const res = await this.fetch(url, { signal });
-			if (recoveringDrop && !res.ok) throw new Error((await res.text()) || STREAM_DROPPED);
-			return res;
+			return await this.fetch(url, { signal });
 		} catch (err) {
-			if (recoveringDrop && !signal?.aborted) throw new StreamReadError(err);
+			// Fetch network failures are TypeErrors. Other throws (a bad
+			// route, an HTTP refusal the caller handles) stay fatal.
+			if (recoveringDrop && !signal?.aborted && err instanceof TypeError) throw new StreamReadError(err);
 			throw err;
 		}
 	}
@@ -809,9 +879,9 @@ export class SessionModel {
 		// refetch latency (dev-compile stalls measured at 1.7s) re-showed
 		// the answered-away question for the whole window: card vanished,
 		// dock returned, both snapped back only when the record landed.
-		// The refetch block below swaps base+tail ATOMICALLY when the record
-		// arrives (and clears on failure — the clean-slate guard holds on
-		// every path that actually replays onto a stale tail).
+		// The refetch adopts the record when it arrives. A missed read keeps
+		// the visible partial. The tail is cleared only once a replay stream
+		// is actually open, so a dropped phone does not blank the turn.
 		if (!refetchRecordFirst) {
 			this.mutate(() => {
 				this.incompleteUsageIds.clear();
@@ -820,36 +890,30 @@ export class SessionModel {
 			});
 		}
 		this.setStatus("submitted");
-		try {
-			if (refetchRecordFirst) {
-				const record = await this.readRecord({ signal: controller.signal, allowInFlight: true, recoveringDrop: !allowRecovery, tolerateHttpFailure: true, isCurrent: () => this.consumeAbort === controller });
-				if (this.consumeAbort !== controller) return;
-				if (!record) {
-					// The record did not land — restore the clean-slate guard
-					// before the replay (no atomic swap is coming).
-					this.mutate(() => {
-						this.incompleteUsageIds.clear();
-						this.tail = [];
-						this.streamingMessageId = null;
-					});
-				}
-			}
-			const res = await this.fetchView(`/api/chats/${encodeURIComponent(this.chatId)}/stream`, controller.signal, !allowRecovery);
-			if (this.consumeAbort !== controller) return;
-			if (!res.ok) throw new Error((await res.text()) || "Failed to attach to the running turn.");
-			await this.consumeStream(res, controller, allowRecovery);
-		} catch (err) {
-			if (this.consumeAbort !== controller || controller.signal.aborted) return; // intentionally cancelled
-			this.retireImagePreview(this.imagePreview?.owner ?? null);
-			// A failed record read can leave the optimistic answer in the tail.
-			// Restore its Submit affordance; the next attempt reconciles first.
-			this.mutate(() => {
-				this.tail = this.tail.filter(m => !this.unconfirmedAnswers.has(m.id));
-				this.unconfirmedAnswers.clear();
-			});
-			this.setError(!allowRecovery && err instanceof StreamReadError ? STREAM_DROPPED : (err as Error).message);
-			this.setStatus("error");
+		void allowRecovery;
+		await this.keepViewAttached(controller, refetchRecordFirst);
+	}
+
+	/** One read-only attachment of the server-owned turn. A transport drop
+	 *  throws so the caller can reattach. An HTTP refusal is a real failure. */
+	private async openTurnView(controller: AbortController, refetchRecordFirst: boolean): Promise<void> {
+		if (refetchRecordFirst) {
+			// Adoption happens inside the read. A miss keeps the visible partial
+			// until a replay is actually open.
+			await this.readRecord({ signal: controller.signal, allowInFlight: true, recoveringDrop: true, tolerateHttpFailure: true, isCurrent: () => this.consumeAbort === controller });
+			if (this.consumeAbort !== controller || controller.signal.aborted) return;
 		}
+		const res = await this.fetchView(`/api/chats/${encodeURIComponent(this.chatId)}/stream`, controller.signal, true);
+		if (this.consumeAbort !== controller || controller.signal.aborted) return;
+		if (!res.ok) throw new Error((await res.text()) || "Failed to attach to the running turn.");
+		// Replay starts now. Keep the previous partial on screen until then,
+		// including while a backgrounded client cannot read the record.
+		this.mutate(() => {
+			this.incompleteUsageIds.clear();
+			this.tail = [];
+			this.streamingMessageId = null;
+		});
+		await this.consumeStream(res, controller, false);
 	}
 
 	/**
@@ -1159,6 +1223,8 @@ export class SessionModel {
 		this.invalidateCanonicalReads();
 		this.consumeAbort?.abort();
 		this.consumeAbort = null;
+		this.reconnectWait?.abort();
+		this.reconnectWait = null;
 		this.streamingIds = new Set();
 		this.streamingMessageId = null;
 		this.executions = new Map();

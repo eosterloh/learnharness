@@ -73,6 +73,24 @@ export function useChatSession({ chatId, initialMessages, initialError, initiall
 		};
 	}, [initiallyInFlight, model]);
 
+	// A backgrounded phone suspends the page and drops the socket. The turn
+	// keeps running on the server. Reattach when the page is visible again,
+	// the network returns, or the Android shell fires lh:resume from onResume.
+	useEffect(() => {
+		const onVisible = () => {
+			if (document.visibilityState === "visible") model.nudgeReconnect(false);
+		};
+		const onResume = () => model.nudgeReconnect(true);
+		document.addEventListener("visibilitychange", onVisible);
+		window.addEventListener("online", onResume);
+		window.addEventListener("lh:resume", onResume);
+		return () => {
+			document.removeEventListener("visibilitychange", onVisible);
+			window.removeEventListener("online", onResume);
+			window.removeEventListener("lh:resume", onResume);
+		};
+	}, [model]);
+
 	// The view + state, derived per model change from the model.
 	const state = useMemo<SessionState>(() => model.getState(), [model, version] as const);
 
