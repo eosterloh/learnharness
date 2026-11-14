@@ -615,9 +615,9 @@ function QuestionDockForm({
 	return (
 		<div ref={rootRef} data-testid="question-dock">
 			{/* Question area — scrolls internally if very tall; the bottom row stays put.
-			    --dock-max-h is the measured budget: the column on desktop, and at
-			    most 58% of the dynamic viewport on a phone so the transcript above
-			    stays visible. The fallback applies only before that measurement. */}
+			    --dock-max-h is the measured budget: the column on desktop, and the
+			    phone sheet (58% of the dynamic viewport until the learner drags it).
+			    The fallback applies only before that measurement. */}
 			<div data-dock-scroll-area="" data-session-find-root="" className="max-h-[var(--dock-max-h,55dvh)] touch-pan-y overflow-y-auto px-4 pt-3">
 				<div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
 					{toolName === "probe"

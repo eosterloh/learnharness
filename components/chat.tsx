@@ -39,7 +39,7 @@ import { useEnterSubmits } from "@/components/enter-submits";
 import { blurAfterPointerClick } from "@/components/focus-hygiene";
 import { dockStateKey } from "@/components/dock-state-key";
 import { clearOpeningPrompt, readOpeningPromptEntry, stashOpeningPrompt, OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
-import { forwardDockWheel, useDockHeight } from "@/components/dock-height";
+import { bindDockSheetHandle, forwardDockWheel, useDockHeight } from "@/components/dock-height";
 import { createDockMorph } from "@/components/dock-morph";
 import { QueuedSteersBody, type QueuedSteerLine } from "@/components/queued-steers";
 import { DictationBar, finishDictation, joinDictation, useDictation, type Dictation } from "@/components/dictation";
@@ -2665,6 +2665,11 @@ export function DockOverlay({
 		expanded, enabled: ownsDock, mode, onScrollbarInset: setSbInset, onHeight: offer,
 		onLayout: retargetOpening,
 	});
+	useEffect(() => {
+		const handle = blockRef.current?.querySelector<HTMLElement>("[data-dock-sheet-handle]");
+		if (!handle) return;
+		return bindDockSheetHandle(handle);
+	}, [mode, expanded]);
 
 	// GROWTH MUTE (owner round, 2026-10-05 — the generation churn): during a
 	// live turn the transcript content grows and stick-to-bottom chases it;
@@ -2843,6 +2848,16 @@ export function DockOverlay({
 			<div className="h-24 bg-gradient-to-t from-background via-background/85 to-transparent" />
 			<div ref={blockRef} className="relative bg-background pb-[max(1.25rem,env(safe-area-inset-bottom))]">
 				<div className={DOCK}>
+					{ownsDock && expanded && (
+						<button
+							type="button"
+							data-dock-sheet-handle=""
+							aria-label="Resize the question card"
+							className="pointer-events-auto hidden h-7 w-full touch-none cursor-grab select-none items-center justify-center active:cursor-grabbing max-sm:flex"
+						>
+							<span aria-hidden className="h-1 w-10 rounded-full bg-muted-foreground/50" />
+						</button>
+					)}
 					<div ref={viewportRef} data-dock-viewport="" className="pointer-events-auto">
 					<div ref={bodyRef}>
 					{setupCta}
