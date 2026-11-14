@@ -18,6 +18,8 @@ services:
       LH_ALLOWED_HOSTS: ${LH_ALLOWED_HOSTS:-}
       # Optional. Leave empty to choose the password in the browser on first visit.
       LH_OWNER_PASSWORD: ${LH_OWNER_PASSWORD:-}
+      # Set to 1 to skip the password entirely (private network only).
+      LH_AUTH_DISABLED: ${LH_AUTH_DISABLED:-}
     volumes:
       - learnharness:/var/lib/learnharness
 

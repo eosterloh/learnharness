@@ -314,7 +314,14 @@ export function authorizedBearer(request: Request, env: Env = process.env): bool
 	return !!token && sessionTokenValid(token, env);
 }
 
+/** `LH_AUTH_DISABLED=1` skips the owner password, for a server only reachable on a private network
+ * (for example tailnet-only Tailscale Serve). Host allowlist and cross-site write checks still apply. */
+export function ownerAuthDisabled(env: Env = process.env): boolean {
+	return env.LH_AUTH_DISABLED === "1";
+}
+
 export function ownerSessionAuthorized(request: Request, env: Env = process.env): boolean {
+	if (ownerAuthDisabled(env)) return true;
 	if (authorizedBearer(request, env)) return true;
 	const cookie = cookieToken(request);
 	return !!cookie && sessionTokenValid(cookie, env);
