@@ -19,8 +19,10 @@ android {
 		applicationId = "dev.learnharness.app"
 		minSdk = 26
 		targetSdk = 35
-		versionCode = 1
+		versionCode = 2
 		versionName = "0.6.1"
+		val defaultServerUrl = (System.getenv("LH_ANDROID_DEFAULT_SERVER_URL") ?: (project.findProperty("lhDefaultServerUrl") as String?) ?: "").trim()
+		buildConfigField("String", "DEFAULT_SERVER_URL", "\"" + defaultServerUrl + "\"")
 	}
 
 	buildFeatures {

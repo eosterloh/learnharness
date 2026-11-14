@@ -103,6 +103,7 @@ class MainActivity : AppCompatActivity() {
 	private fun prefs() = getSharedPreferences(PREFS, MODE_PRIVATE)
 
 	private fun savedUrl(): String? = prefs().getString(SERVER_URL, null)?.takeIf { it.isNotBlank() }
+		?: BuildConfig.DEFAULT_SERVER_URL.takeIf { it.isNotBlank() }
 
 	private fun showSetup() {
 		setup.visibility = View.VISIBLE
