@@ -60,6 +60,14 @@ class MainActivity : AppCompatActivity() {
 		if (saved == null) showSetup() else open(saved)
 	}
 
+	override fun onResume() {
+		super.onResume()
+		if (!::webView.isInitialized || setup.visibility == View.VISIBLE) return
+		// The page's session listens for this and reattaches a server-owned turn.
+		// visibilitychange is not reliable after the WebView has been suspended.
+		webView.evaluateJavascript("window.dispatchEvent(new Event('lh:resume'))", null)
+	}
+
 	@SuppressLint("SetJavaScriptEnabled")
 	private fun configureWebView() {
 		webView.settings.apply {

@@ -180,17 +180,22 @@ describe("new-session opening delivery acceptance", () => {
 		assert.deepEqual(m.getState().nativeMessages.map(message => message.content), ["ordinary text"]);
 	});
 
-	it("post-acceptance attachment failure remains accepted and does not resend input", async () => {
+	it("post-acceptance attachment failure stays accepted, retries the view, and does not resend input", async () => {
 		let posts = 0;
 		let notified = 0;
-		const m = new SessionModel({ chatId: "c1", initialMessages: [], fetch: async url => {
+		let reads = 0;
+		const m = new SessionModel({ chatId: "c1", initialMessages: [], reconnectDelayMs: 0, fetch: async url => {
 			if (String(url) === "/api/chat") { posts++; return Response.json({ ok: true }); }
-			throw new TypeError("record read failed");
+			if (String(url).endsWith("/stream")) return new Response("data: {\"type\":\"turn-settled\"}\n\ndata: [DONE]\n\n");
+			if (++reads === 1) throw new TypeError("record read failed");
+			return Response.json({ messages: [newUserMessage("hello")] });
 		} });
 		assert.equal(await m.send({ type: "text", text: "hello" }, () => { notified++; }), true);
 		assert.equal(notified, 1);
 		assert.equal(posts, 1);
-		assert.equal(m.status, "error");
+		assert.equal(reads >= 2, true);
+		assert.equal(m.status, "ready");
+		assert.equal(m.getState().error, null);
 	});
 
 	it("a busy gate sends nothing, then canonical adoption can confirm an earlier lost acknowledgment", async () => {
