@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="app_name">LearnHarness</string>
+	<string name="setup_title">LearnHarness</string>
+	<string name="setup_body">Address of your server. Sign-in happens on that server, and the session stays on this phone.</string>
+	<string name="server_hint">https://your-spark.tail.ts.net</string>
+	<string name="connect">Connect</string>
+</resources>

@@ -1,5 +1,14 @@
 import { timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
+import {
+	authorizedBearer,
+	isPublicAuthRequest,
+	ownerSessionAuthorized,
+	serverMode,
+	syncOwnerPasswordFromEnv,
+} from "./owner-auth.ts";
+
+export { serverMode };
 
 /** Browser-only mode: `next dev` / `next start` without the desktop shell's
  * per-launch secret. */
@@ -15,6 +24,7 @@ export function desktopAPIAuthorized(
 	env: Record<string, string | undefined> = process.env,
 ): boolean {
 	const expected = env.LH_DESKTOP_API_SECRET;
+	if (serverMode(env)) return false;
 	if (browserOnlyMode(env)) return true;
 	if (!expected || expected.length < 64) return false;
 	const supplied = headers.get("x-learnharness-desktop");
@@ -57,23 +67,68 @@ export function browserHostAllowed(host: string | null, env: Record<string, stri
 /** Shared by Proxy and the streamed document route that deliberately bypasses
  * Proxy's truncated body clone. Check before any route-specific work. */
 export function apiRequestRefusal(request: Request, env: Record<string, string | undefined> = process.env): string | undefined {
-	if (browserOnlyMode(env)) return browserAPIRefusal(request, env);
-	if (!desktopAPIAuthorized(request.headers, env)) return "Desktop API access requires the trusted LearnHarness window.";
+	return apiRequestDecision(request, env)?.error;
 }
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-/** Browser-only API gate: a Host check against DNS rebinding and a
- * cross-site check on writes. Writes without Origin or Sec-Fetch-Site come
- * from non-browser clients and are allowed. Returns the refusal, if any. */
-export function browserAPIRefusal(request: Request, env: Record<string, string | undefined> = process.env): string | undefined {
+function hostRefusal(request: Request, env: Record<string, string | undefined>): string | undefined {
 	if (!browserHostAllowed(request.headers.get("host") ?? new URL(request.url).host, env)) {
 		return "This host name is not allowed. Use localhost or an IP address, or add the name to LH_ALLOWED_HOSTS.";
 	}
+}
+
+/** Writes without Origin or Sec-Fetch-Site come from non-browser clients
+ * and are allowed. Reads are not a cross-site leak. */
+function writeCrossSiteRefusal(request: Request): string | undefined {
 	if (READ_METHODS.has(request.method.toUpperCase())) return;
 	const site = request.headers.get("sec-fetch-site");
 	const origin = request.headers.get("origin");
 	if ((site !== null && site !== "same-origin") || (origin !== null && origin !== subscriptionRequestOrigin(request))) {
 		return "Cross-site requests to the LearnHarness API are not allowed.";
+	}
+}
+
+/** Browser-only API gate: a Host check against DNS rebinding and a
+ * cross-site check on writes. Returns the refusal, if any. */
+export function browserAPIRefusal(request: Request, env: Record<string, string | undefined> = process.env): string | undefined {
+	return hostRefusal(request, env) ?? writeCrossSiteRefusal(request);
+}
+
+export type ApiRefusal = { error: string; status: number };
+
+function serverAPIRefusal(request: Request, env: Record<string, string | undefined>): ApiRefusal | undefined {
+	// Hash an env password at most once per unchanged file. Login still
+	// verifies the submitted password on its own.
+	syncOwnerPasswordFromEnv(env);
+	const host = hostRefusal(request, env);
+	if (host) return { error: host, status: 403 };
+	let pathname = "/";
+	try {
+		pathname = new URL(request.url).pathname;
+	} catch { /* treated as a protected path */ }
+	if (isPublicAuthRequest(request.method, pathname)) {
+		const crossSite = writeCrossSiteRefusal(request);
+		return crossSite ? { error: crossSite, status: 403 } : undefined;
+	}
+	if (!ownerSessionAuthorized(request, env)) return { error: "Sign in required.", status: 401 };
+	// A bearer credential is not attached by a browser navigation. Cookie
+	// sessions still refuse cross-site writes.
+	if (!authorizedBearer(request, env)) {
+		const crossSite = writeCrossSiteRefusal(request);
+		if (crossSite) return { error: crossSite, status: 403 };
+	}
+}
+
+/** Shared by Proxy and the streamed document route. Status is 401 for a
+ * missing server-mode session and 403 for the desktop and browser gates. */
+export function apiRequestDecision(request: Request, env: Record<string, string | undefined> = process.env): ApiRefusal | undefined {
+	if (serverMode(env)) return serverAPIRefusal(request, env);
+	if (browserOnlyMode(env)) {
+		const error = browserAPIRefusal(request, env);
+		return error ? { error, status: 403 } : undefined;
+	}
+	if (!desktopAPIAuthorized(request.headers, env)) {
+		return { error: "Desktop API access requires the trusted LearnHarness window.", status: 403 };
 	}
 }

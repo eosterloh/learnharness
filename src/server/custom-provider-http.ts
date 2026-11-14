@@ -6,7 +6,8 @@ import { readSettings, writeSettings } from "../store/settings.ts";
 import { readCustomAuth } from "../store/auth.ts";
 import { customAuthState, customKeyAuthorized, persistCustomAuth } from "./custom-provider-auth.ts";
 import type { CustomAuthBinding } from "../core/custom-provider-auth.ts";
-import { desktopAPIAuthorized } from "./desktop-access.ts";
+import { desktopAPIAuthorized, serverMode } from "./desktop-access.ts";
+import { authorizedBearer, ownerSessionAuthorized } from "./owner-auth.ts";
 import { subscriptionRequestOrigin } from "./web-subscription-http.ts";
 import { discoverModels, mergeManualModels, syncCustomProvider } from "./custom-provider.ts";
 import { parseCustomModelOverridesBody } from "./settings-body.ts";
@@ -48,6 +49,11 @@ export function customProviderGet(request: Request): Response {
 }
 
 function authorized(request: Request): boolean {
+	if (serverMode()) {
+		if (!ownerSessionAuthorized(request)) return false;
+		// Bearer clients are not browsers. Cookie sessions stay same-origin.
+		if (authorizedBearer(request)) return true;
+	}
 	const desktop = process.env.LH_DESKTOP_SERVER === "1" || Boolean(process.env.LH_DESKTOP_API_SECRET);
 	if (desktop) return desktopAPIAuthorized(request.headers);
 	const origin = request.headers.get("origin");

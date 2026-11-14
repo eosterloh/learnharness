@@ -1,0 +1,26 @@
+name: learnharness
+
+services:
+  learnharness:
+    build: .
+    image: learnharness:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      LH_SERVER_MODE: "1"
+      LH_DATA_DIR: /var/lib/learnharness/data
+      LH_AUTH_FILE: /var/lib/learnharness/auth.json
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      CHROME_PATH: /usr/bin/chromium
+      # MagicDNS name only, no scheme or port. Empty until you set it.
+      LH_ALLOWED_HOSTS: ${LH_ALLOWED_HOSTS:-}
+      # Optional. Leave empty to choose the password in the browser on first visit.
+      LH_OWNER_PASSWORD: ${LH_OWNER_PASSWORD:-}
+    volumes:
+      - learnharness:/var/lib/learnharness
+
+volumes:
+  learnharness:
+    name: learnharness

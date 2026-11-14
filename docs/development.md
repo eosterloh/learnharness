@@ -42,6 +42,8 @@ npm run dev -- -H 0.0.0.0     # then browse to http://<this machine's IP>:3000
 
 The API accepts `localhost` and IP addresses as the host name. To use any other name (`mymac.local`, a reverse-proxy domain), list it in `LH_ALLOWED_HOSTS`. Browser writes must come from the same origin as the page.
 
+That open browser mode is not the way to share one profile between a Mac and a phone. [Self-hosting](self-hosting.md) runs one server with a password, and both clients use it.
+
 ## Configuration
 
 Nonsecret settings are deltas in `<data root>/settings.json`; absent values resolve through `src/core/settings.ts` and `settings-resolution.ts`. Models and role overrides are settings, not environment variables. [Prompt overrides](../src/agent/prompts/README.md) live under `<data root>/prompts/` and require explicit enable switches.
@@ -54,7 +56,11 @@ Nonsecret settings are deltas in `<data root>/settings.json`; absent values reso
 | `TAVILY_API_KEY`, `BRAVE_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `OLLAMA_API_KEY` | Optional search adapters. Without a Settings pin, the first keyed engine wins: Tavily → Brave → Exa → Firecrawl → Ollama. A pinned engine requires its own key; no silent fallback. Ollama search is hosted at ollama.com, not a local model server. Page fetching is independent; research can fetch known URLs without a search key. |
 | `DEEPGRAM_API_KEY` | Optional dictation token minting. |
 | `CHROME_PATH` | Chrome/Chromium executable fallback for demo verification; Electron's browser helper is primary. No extra Chromium is downloaded. |
-| `LH_ALLOWED_HOSTS` | Browser-only mode: extra host names the API accepts besides `localhost` and IP addresses. Comma-separated, case-insensitive, port ignored, no wildcards. |
+| `LH_ALLOWED_HOSTS` | Extra host names the API accepts besides `localhost` and IP addresses. Comma-separated, case-insensitive, port ignored, no wildcards. Required for a MagicDNS name in server mode. |
+| `LH_SERVER_MODE` | `1` requires the owner password on `/api/*` and on page loads. A desktop secret still wins, so the Electron child is unchanged. |
+| `LH_OWNER_PASSWORD` | Server mode. When set, it is hashed beside `LH_AUTH_FILE` and replaces a stored hash. 8 to 200 characters. Omit it to choose the password in the browser once. |
+| `LH_COOKIE_SECURE` | Server mode cookies are `Secure` unless this is `0` (plain HTTP). `1` forces `Secure`. |
+| `LH_SERVER_URL` | Desktop shell only. `https://…` origin of a remote server. The shell does not spawn a local server. A saved setting is the same choice without the variable. |
 
 Ordinary Next development can read `.env.local`. Real environment keys take precedence over saved keys. Saved auth is restrictive-permission plaintext, not an encrypted vault. Packaged Electron sets separate data/auth locations under `userData`; it does not use the repo development profile.
 

@@ -167,6 +167,8 @@ Chats and graph-family files have separate version guards; absent stamps read as
 
 Packaged Electron launches a private standalone Next child on loopback, sets data/auth paths, and loads a sandboxed renderer. Its navigation/permission and credential transport guards are desktop boundaries, not web multi-user authentication. [Desktop releases](desktop-release.md) covers tracing/packaging checks.
 
+`LH_SERVER_MODE=1` is the headless gate for one owner. `/api/*` (including SSE) and page loads require a scrypt password hash stored beside `LH_AUTH_FILE`. A session is an httpOnly cookie or a bearer token. The desktop capability is unchanged and wins if both are set, so the packaged child never asks for the password. [Self-hosting](self-hosting.md) is the deployment. One process owns a data directory; there is no second writer and no sync engine.
+
 [`models.ts`](../src/agent/models.ts) composes Pi providers and app bridges. Strong/Cheap/Vision slots have no factory model pins. Sessions retain explicit choices; background roles resolve independently. Missing configuration/readiness refuses rather than silently choosing another provider.
 
 API environment values override saved keys. Packaged subscription refresh credentials stay in Electron main; web/dev uses server-owned connection files. Subscription routes do not fall back to API billing. [Claude Code](claude-code.md) retains native CLI authentication/routing but bridges LearnHarness tools; [custom endpoints](custom-providers.md) bind authorization to URL/mode and resolve settings per operation. Neither route has inferred zero-dollar pricing. [Accounting](compaction-accounting.md) owns context/cache/cost semantics.

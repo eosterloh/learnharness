@@ -34,6 +34,8 @@
  * Channel names are mirrored in electron/main.cjs — keep them in sync.
  */
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
+const remoteServer = process.argv?.includes("--lh-remote-server");
+const webSubscriptions = process.argv?.includes("--lh-web-subscriptions");
 
 let openSettingsListener = null;
 let pendingOpenSettings = null;
@@ -46,9 +48,16 @@ contextBridge.exposeInMainWorld("lh", {
 	platform: process.platform,
 	// Resolve only a renderer-supplied, OS-backed File. No filesystem API,
 	// uploads, copies, or DOM File IPC to main; sandbox/isolation stay on.
-	getPathForFile: (file) => webUtils.getPathForFile(file),
-	chooseAttachmentFolder: () => ipcRenderer.invoke("lh:attachment:pick", "folder"),
-	...(process.argv?.includes("--lh-web-subscriptions") ? {
+	// A remote server cannot read this Mac's paths, so the browser notice is used.
+	...(remoteServer ? {} : {
+		getPathForFile: (file) => webUtils.getPathForFile(file),
+		chooseAttachmentFolder: () => ipcRenderer.invoke("lh:attachment:pick", "folder"),
+	}),
+	clientConnection: {
+		get: () => ipcRenderer.invoke("lh:client-connection:get"),
+		set: (serverUrl) => ipcRenderer.invoke("lh:client-connection:set", serverUrl),
+	},
+	...(webSubscriptions ? {
 		subscriptionTransport: "web",
 		openSubscriptionBrowser: (action) => ipcRenderer.invoke("lh:subscriptions:web-browser", action),
 	} : {}),

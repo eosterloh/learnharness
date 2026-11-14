@@ -31,6 +31,7 @@ const { attachChatGPTChild, trustedSender, chatGPTControl } = require("./chatgpt
 const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cjs");
 const { attachSubscriptionChild, subscriptionControl } = require("./subscription-ipc.cjs");
 const { desktopAPIHeaders } = require("./desktop-api.cjs");
+const { resolveClientConnection, readClientSettings, writeClientSettings, parseServerUrl } = require("./client-connection.cjs");
 const { openWebSubscriptionBrowser } = require("./web-subscription-browser.cjs");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
@@ -154,6 +155,7 @@ let subscriptions = null;
 let subscriptionChild = null;
 // Per-launch request capability, never OAuth tokens and never renderer state.
 let desktopAPISecret = null;
+let remoteShell = false;
 let reopenWindow = null;
 const trustedAppWindows = new Set();
 
@@ -317,6 +319,13 @@ function openExternalLink(target) {
  *  - will-navigate pinned to the app origin; window.open always denied —
  *    external links go to the real browser via shell.openExternal, for
  *    http, https and mailto only (openExternalLink). */
+function shellArguments() {
+	const args = [];
+	if (process.env.LH_DEV_URL || remoteShell) args.push("--lh-web-subscriptions");
+	if (remoteShell) args.push("--lh-remote-server");
+	return args.length ? { additionalArguments: args } : {};
+}
+
 function createWindow(url) {
 	const win = new BrowserWindow({
 		width: 1440,
@@ -347,8 +356,8 @@ function createWindow(url) {
 			contextIsolation: true,
 			sandbox: true,
 			nodeIntegration: false,
-			...(process.env.LH_DEV_URL ? { additionalArguments: ["--lh-web-subscriptions"] } : {}),
 			preload: path.join(__dirname, "preload.cjs"),
+			...shellArguments(),
 		},
 		// Live-resize + first-paint flash (owner, 2026-09-17): during a resize
 		// the native window surface changes size before Chromium's compositor
@@ -690,8 +699,21 @@ async function main() {
 	// spawn, no packaging, full HMR. The rest of this shell still applies
 	// (guards, menu, single instance).
 	const devUrl = process.env.LH_DEV_URL;
-	const url = devUrl ?? `http://127.0.0.1:${await freePort()}`;
+	let remoteUrl = null;
 	if (!devUrl) {
+		const connection = resolveClientConnection({
+			env: process.env,
+			saved: readClientSettings(path.join(app.getPath("userData"), "client-settings.json")),
+		});
+		if (connection.mode === "remote" && connection.url) {
+			remoteUrl = connection.url;
+			remoteShell = true;
+		} else if (connection.error) {
+			log(`remote server URL ignored: ${connection.error}`);
+		}
+	}
+	const url = devUrl ?? remoteUrl ?? `http://127.0.0.1:${await freePort()}`;
+	if (!devUrl && !remoteUrl) {
 		desktopAPISecret = randomBytes(32).toString("hex");
 		const ownedOrigin = new URL(url).origin;
 		// All URLs, not only /api: remove the header again on external redirects.
@@ -721,7 +743,7 @@ async function main() {
 		await startServer(new URL(url).port);
 		await waitUntilUp(url);
 		log(`server up: ${url}`);
-	} else {
+	} else if (devUrl) {
 		log(`dev mode: ${devUrl} — waiting for server`);
 		const { waitForDevServer } = require("./dev-server-readiness.cjs");
 		const startup = new AbortController();
@@ -740,6 +762,8 @@ async function main() {
 		} finally {
 			app.removeListener("before-quit", cancelStartup);
 		}
+	} else {
+		log(`remote server: ${remoteUrl} — sign in on that server`);
 	}
 
 	// Renderer controls contain no token/URL/code operation. The separate server
@@ -764,6 +788,31 @@ async function main() {
 	ipcMain.handle("lh:subscriptions:web-browser", async (event, action) => {
 		if (!devUrl || !trustedAppWindows.has(BrowserWindow.fromWebContents(event.sender)) || !trustedSender(event, new URL(url).origin, BrowserWindow)) throw new Error("Untrusted development request.");
 		await openWebSubscriptionBrowser(action, new URL(url).origin, { openExternal: (target) => shell.openExternal(target) });
+	});
+
+	ipcMain.handle("lh:client-connection:get", (event) => {
+		if (!trustedAppWindows.has(BrowserWindow.fromWebContents(event.sender)) || !trustedSender(event, new URL(url).origin, BrowserWindow)) throw new Error("Untrusted desktop request.");
+		const saved = readClientSettings(path.join(app.getPath("userData"), "client-settings.json"));
+		const connection = resolveClientConnection({ env: process.env, saved });
+		return {
+			mode: connection.mode === "remote" ? "remote" : devUrl ? "dev" : "local",
+			url: connection.mode === "local" ? null : connection.url,
+			source: connection.source,
+			serverUrl: saved.serverUrl ?? "",
+		};
+	});
+	ipcMain.handle("lh:client-connection:set", (event, serverUrl) => {
+		if (!trustedAppWindows.has(BrowserWindow.fromWebContents(event.sender)) || !trustedSender(event, new URL(url).origin, BrowserWindow)) throw new Error("Untrusted desktop request.");
+		if (process.env.LH_DEV_URL) return { error: "This development window follows LH_DEV_URL." };
+		if (process.env.LH_SERVER_URL) return { error: "LH_SERVER_URL is set in the environment. Unset it to change the server here." };
+		const parsed = parseServerUrl(serverUrl);
+		if (parsed.error) return { error: parsed.error };
+		writeClientSettings(path.join(app.getPath("userData"), "client-settings.json"), parsed.url);
+		setImmediate(() => {
+			app.relaunch();
+			app.exit(0);
+		});
+		return { ok: true };
 	});
 
 	ipcMain.handle("lh:attachment:pick", (event, mode) => pickAttachmentPath(event, mode, {
