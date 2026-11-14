@@ -20,6 +20,8 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : AppCompatActivity() {
 	private lateinit var webView: WebView
@@ -30,6 +32,16 @@ class MainActivity : AppCompatActivity() {
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
 		setContentView(R.layout.activity_main)
+		// targetSdk 35 forces edge-to-edge; keep content out of the status bar,
+		// navigation bar, display cutout and the on-screen keyboard.
+		val root = findViewById<View>(android.R.id.content)
+		ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+			val bars = insets.getInsets(
+				WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime()
+			)
+			view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+			WindowInsetsCompat.CONSUMED
+		}
 		webView = findViewById(R.id.web)
 		setup = findViewById(R.id.setup)
 		urlField = findViewById(R.id.server_url)
