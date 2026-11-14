@@ -35,7 +35,7 @@ Object.assign(globalThis, {
 // dock import would select the hook's SSR effect before this setup ever runs.
 const { QuestionDock } = await import("../components/question-dock.tsx");
 const { PracticeDock } = await import("../components/practice-dock.tsx");
-const { dockHeightBudget, syncDockHeight, useDockHeight, forwardDockWheel } = await import("../components/dock-height.ts");
+const { PHONE_DOCK_BLOCK_FRACTION, dockHeightBudget, phoneDockBlockCap, syncDockHeight, useDockHeight, forwardDockWheel } = await import("../components/dock-height.ts");
 
 const normal = {
 	columnHeight: 700, outsideHeight: 60, beforeShellHeight: 0,
@@ -74,6 +74,26 @@ describe("dockHeightBudget — whole dock, not just its question", () => {
 		assert.equal(dockHeightBudget({ ...normal, questionHeight: null, contentHeight: 42 }).scrollWholeContent, false);
 		assert.equal(dockHeightBudget({ ...normal, questionHeight: null, contentHeight: 42, beforeShellHeight: 650 }).scrollWholeContent, true);
 	});
+	it("caps a phone dock at 58% of the dynamic viewport and leaves the column above it", () => {
+		assert.equal(phoneDockBlockCap(1200, 900), null);
+		assert.equal(phoneDockBlockCap(640, 900), null);
+		const cap = phoneDockBlockCap(412, 800);
+		assert.equal(cap, 800 * PHONE_DOCK_BLOCK_FRACTION);
+		const open = dockHeightBudget({ ...normal, columnHeight: 740, outsideHeight: 48, viewportCap: cap });
+		assert.equal(open.viewportMaxHeight, 800 * PHONE_DOCK_BLOCK_FRACTION - 48);
+		assert.ok(740 - open.viewportMaxHeight - 48 > 200, "transcript keeps a visible band above the card");
+		assert.equal(open.scrollWholeContent, false);
+		assert.ok((open.questionMaxHeight ?? 0) > 12, "options keep their own scroller");
+	});
+	it("keeps the answer controls reachable when the keyboard shrinks a phone viewport", () => {
+		const cap = phoneDockBlockCap(412, 360);
+		const keyboard = dockHeightBudget({
+			...normal, columnHeight: 300, outsideHeight: 40, contentHeight: 700, questionHeight: 500, viewportCap: cap,
+		});
+		assert.equal(keyboard.scrollWholeContent, true);
+		assert.ok(keyboard.viewportMaxHeight > 0);
+		assert.equal(keyboard.viewportMaxHeight, Math.min(300 - 32 - 40, 360 * PHONE_DOCK_BLOCK_FRACTION - 40));
+	});
 });
 
 // These mocked dimensions test the DOM/lifecycle seam, not real CSS layout.
@@ -89,7 +109,8 @@ dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
 	return originalRect.call(this);
 };
 Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { configurable: true, get() { return this.dataset.part === "column" ? sizes.column : Number(this.dataset.clientHeight ?? 0); } });
-Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { configurable: true, get() { return this.dataset.part === "column" ? 680 : 700; } });
+let columnWidth = 680;
+Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { configurable: true, get() { return this.dataset.part === "column" ? columnWidth : 700; } });
 Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { configurable: true, get() { return 700; } });
 Object.defineProperty(dom.window.HTMLElement.prototype, "scrollHeight", { configurable: true, get() { return Number(this.dataset.scrollHeight ?? 0); } });
 
@@ -295,6 +316,24 @@ describe("measured question/practice DOM and observer lifecycle", () => {
 				body: part(host, "body"), shell: part(host, "shell"), content: part(host, "content") };
 			assert.deepEqual(syncDockHeight(elements, true), syncDockHeight(elements, true));
 		});
+	});
+	it("caps a phone-width column from the dynamic viewport before the morph layout effect", async () => {
+		const previousWidth = columnWidth;
+		const previousHeight = dom.window.innerHeight;
+		columnWidth = 412;
+		Object.defineProperty(dom.window, "innerHeight", { configurable: true, value: 800 });
+		try {
+			await withFixture(async (host, render) => {
+				sizes.column = 740;
+				await render({ inspected: block => assert.equal(block.style.getPropertyValue("--dock-max-h"), "202px") });
+				assert.equal(part(host, "viewport").style.maxHeight, "404px");
+				assert.equal(part(host, "shell").style.maxHeight, "404px");
+				assert.equal(part(host, "viewport").style.overflowY, "visible");
+			});
+		} finally {
+			columnWidth = previousWidth;
+			Object.defineProperty(dom.window, "innerHeight", { configurable: true, value: previousHeight });
+		}
 	});
 });
 

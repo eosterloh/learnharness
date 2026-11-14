@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, type RefObject } from "react";
+import { PHONE_WIDTH } from "@/components/sidebar-layout";
 
 const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -16,11 +17,32 @@ export interface DockHeightMeasurements {
 	/** Null when collapsed, in chat mode, or showing malformed input. */
 	questionHeight: number | null;
 	questionPaddingHeight: number;
+	/** Max height of the dock block on a phone. Absent on desktop. */
+	viewportCap?: number | null;
+}
+
+/** Phone cards stay within this share of the dynamic viewport so the
+ * transcript above them remains visible. Desktop does not use it. */
+export const PHONE_DOCK_BLOCK_FRACTION = 0.58;
+
+export function phoneDockBlockCap(columnWidth: number, dynamicViewportHeight: number): number | null {
+	if (!(columnWidth > 0) || columnWidth >= PHONE_WIDTH) return null;
+	if (!(dynamicViewportHeight > 0)) return null;
+	return dynamicViewportHeight * PHONE_DOCK_BLOCK_FRACTION;
+}
+
+function dynamicViewportHeight(): number {
+	const layout = window.innerHeight;
+	const visual = window.visualViewport?.height ?? 0;
+	if (visual > 0 && layout > 0) return Math.min(visual, layout);
+	return visual > 0 ? visual : layout;
 }
 
 export function dockHeightBudget(m: DockHeightMeasurements) {
 	const available = Math.max(m.columnHeight - 32, 0);
-	const viewportMaxHeight = Math.max(available - m.outsideHeight, 0);
+	const uncappedViewport = Math.max(available - m.outsideHeight, 0);
+	const phoneViewport = m.viewportCap == null ? null : Math.max(m.viewportCap - m.outsideHeight, 0);
+	const viewportMaxHeight = phoneViewport == null ? uncappedViewport : Math.min(uncappedViewport, phoneViewport);
 	const shellMaxHeight = Math.max(viewportMaxHeight - m.beforeShellHeight, 0);
 	const naturalHeight = m.beforeShellHeight + m.shellBorderHeight + m.contentHeight;
 	const questionMaxHeight = m.questionHeight === null
@@ -68,16 +90,18 @@ export function syncDockHeight(elements: DockHeightElements, expanded: boolean) 
 		questionPaddingHeight: questionStyle
 			? pixels(questionStyle.paddingTop) + pixels(questionStyle.paddingBottom)
 			: 0,
+		viewportCap: phoneDockBlockCap(column.clientWidth, dynamicViewportHeight()),
 	});
+	const px = (value: number) => `${Math.round(value)}px`;
 	if (budget.questionMaxHeight === null) block.style.removeProperty("--dock-max-h");
-	else block.style.setProperty("--dock-max-h", budget.scrollWholeContent ? "none" : `${budget.questionMaxHeight}px`);
-	viewport.style.maxHeight = `${budget.viewportMaxHeight}px`;
+	else block.style.setProperty("--dock-max-h", budget.scrollWholeContent ? "none" : px(budget.questionMaxHeight));
+	viewport.style.maxHeight = px(budget.viewportMaxHeight);
 	// Overflow is visible in normal layouts: keep the shell's shadow intact.
 	// The stats/model toolbar is a sibling, never inside this overflow box.
 	viewport.style.overflowY = budget.scrollWholeContent ? "auto" : "visible";
 	// Clamp animated starting heights too, so a previous tall variant cannot
 	// paint above the column while morphing into a constrained layout.
-	shell.style.maxHeight = budget.scrollWholeContent ? "none" : `${budget.shellMaxHeight}px`;
+	shell.style.maxHeight = budget.scrollWholeContent ? "none" : px(budget.shellMaxHeight);
 	return budget;
 }
 
@@ -142,10 +166,12 @@ export function useDockHeight({
 		const question = expanded ? contentRef.current?.querySelector("[data-dock-scroll-area]") : null;
 		if (question) observer.observe(question);
 		window.addEventListener("resize", observedMeasure);
+		window.visualViewport?.addEventListener("resize", observedMeasure);
 		return () => {
 			active = false;
 			observer.disconnect();
 			window.removeEventListener("resize", observedMeasure);
+			window.visualViewport?.removeEventListener("resize", observedMeasure);
 		};
 	}, [measure, mode, expanded, scrollRef, blockRef, viewportRef, bodyRef, contentRef]);
 }
